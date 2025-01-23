@@ -1,6 +1,6 @@
 pub struct Window {
     size: u16,
-    start: u16,
+    pub start: u16,
     end: u16,
     pub next_send: u16,
 }
@@ -16,10 +16,13 @@ impl Window {
     }
 
     pub fn update(&mut self, ack: u16) {
+        /* ack 落在窗口内 */
         if ack.wrapping_sub(self.start) < self.size {
             self.start = ack.wrapping_add(1);
             self.next_send = self.start;
             self.end = self.start.wrapping_add(self.size)
+        } else {
+            self.next_send = self.start;
         }
     }
 }
@@ -31,9 +34,9 @@ impl Iterator for Window {
         if self.next_send == self.end {
             None
         } else {
-            let next = Some(self.next_send);
+            let cur = self.next_send;
             self.next_send = self.next_send.wrapping_add(1);
-            next
+            Some(cur)
         }
     }
 }
