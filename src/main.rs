@@ -136,7 +136,6 @@ async fn rrq_handler(
             if let Ok(_) = socket.try_peek_sender() {
                 println!("readable");
                 window.next_send = window.next_send.wrapping_sub(1);
-                size = 0;
                 break;
             }
 
@@ -153,26 +152,30 @@ async fn rrq_handler(
                 break;
             }
         }
-        let diff: u16;
-        if let Ok(res) = timeout(timeout_duration, recv_ack(&socket)).await {
-            let ack_block = res?;
-            let tmp = window.next_send;
-            window.update(ack_block);
-            diff = tmp.wrapping_sub(window.next_send);
-            retries = 0;
-        } else {
-            println!("timeout");
-            retries += 1;
-            if retries == max_retries {
-                return send_error(&socket, format!("Max retries reached")).await;
+        let ack_block = match timeout(timeout_duration, recv_ack(&socket)).await {
+            Ok(res) => {
+                retries = 0;
+                res?
             }
-            diff = window.next_send.wrapping_sub(window.start);
-            window.next_send = window.start;
+            Err(_) => {
+                println!("timeout");
+                retries += 1;
+                if retries == max_retries {
+                    return send_error(&socket, format!("Max retries reached")).await;
+                }
+                window.start.wrapping_sub(1)
+            }
         };
-        if diff != 0 {
+        let offset = window.update(ack_block);
+        let offset_size;
+        if offset != 0 {
             println!("retrans #{}", window.next_send);
-            let diff: i64 = ((diff - 1) as i64) * (blksize as i64) + (size as i64);
-            let _ = file.seek(SeekFrom::Current(-diff))?;
+            if offset < 0 {
+                offset_size = (offset + 1) * (blksize as i64) + (size as i64);
+            } else {
+                offset_size = offset * (blksize as i64);
+            }
+            file.seek(SeekFrom::Current(offset_size))?;
             finish = false;
         }
     }
