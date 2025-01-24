@@ -6,7 +6,7 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::net::SocketAddr;
 use tokio::net::UdpSocket;
 use tokio::task;
-use tokio::time::{Duration, Instant};
+use tokio::time::{timeout, Duration, Instant};
 
 use tftp::Cli;
 use tftp::TftpPacket;
@@ -18,6 +18,8 @@ async fn main() -> io::Result<()> {
     let socket = UdpSocket::bind("0.0.0.0:69").await?;
     let mut buf: [u8; 100] = [0; 100];
     let workdir = std::env::current_dir()?;
+    let timeout = Duration::from_millis(1000);
+    let max_retries = 3;
 
     println!(
         "TFTP server listen on {}, workdir: {}",
@@ -28,22 +30,25 @@ async fn main() -> io::Result<()> {
     loop {
         let (num, addr) = socket.recv_from(&mut buf).await?;
 
-        let Ok(pkt) = TftpPacket::deserialize(&buf[..num]) else {
-            continue;
-        };
-        println!("{addr} {pkt:?}");
-
-        match pkt {
-            TftpPacket::RRQ {
-                filename,
-                mode,
-                options,
-            } => {
-                task::spawn(
-                    async move { rrq_handler(addr, filename, mode, options).await.unwrap() },
-                );
+        if let Ok(pkt) = TftpPacket::deserialize(&buf[..num]) {
+            println!("{addr} {pkt:?}");
+            match pkt {
+                TftpPacket::RRQ {
+                    filename,
+                    mode,
+                    options,
+                } => {
+                    task::spawn(async move {
+                        rrq_handler(addr, filename, mode, options, timeout, max_retries)
+                            .await
+                            .unwrap()
+                    });
+                }
+                TftpPacket::WRQ { .. } => {
+                    println!("WRQ is not supported");
+                }
+                _ => (),
             }
-            _ => (),
         }
     }
 }
@@ -53,57 +58,44 @@ async fn rrq_handler(
     filename: String,
     mode: String,
     options: HashMap<String, String>,
+    timeout_duration: Duration,
+    max_retries: u8,
 ) -> anyhow::Result<()> {
     let start = Instant::now();
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
     socket.connect(addr).await?;
-    // socket.set_read_timeout(Some(Duration::from_secs(tftp::DEF_TIMEOUT_SEC)))?;
 
     // 仅支持octet模式
     if mode != "octet" {
-        let error = TftpPacket::ERROR {
-            code: 0,
-            msg: format!("unsupported mode: {mode}").to_string(),
-        };
-        socket.send(&error.serialize()).await?;
-        return Err(anyhow!("unsupported mode: {mode}"));
+        return send_error(&socket, format!("Unsupported '{mode}' mode")).await;
     }
 
-    // 判断文件是否存在
-    let file_metadata = match fs::metadata(&filename) {
-        Ok(x) => x,
+    // 获取文件大小
+    let filesize = match fs::metadata(&filename) {
+        Ok(metadata) => metadata.len(),
         Err(e) => {
-            let error = TftpPacket::ERROR {
-                code: 1,
-                msg: format!("{:?}", e.kind()).to_string(),
-            };
-            socket.send(&error.serialize()).await?;
-            Err(e)
-        }?,
+            return send_error(&socket, format!("{e}")).await;
+        }
     };
-    let filesize = file_metadata.len();
 
-    let mut windowsize: u16 = tftp::DEF_WINDOW_SIZE;
-    let mut blksize: u16 = tftp::DEF_BLOCK_SIZE;
+    let mut windowsize = tftp::DEF_WINDOW_SIZE;
+    let mut blksize = tftp::DEF_BLOCK_SIZE;
     // 选项协商
     let mut nego_options: HashMap<String, String> = HashMap::new();
     for (key, value) in options {
         match key.as_str() {
             "blksize" => {
-                let Ok(value) = value.parse() else {
-                    return Err(anyhow!("key value parse error"));
-                };
-                let value = std::cmp::min(value, tftp::MAX_BLOCK_SIZE);
-                let value = std::cmp::max(value, tftp::MIN_BLOCK_SIZE);
-                blksize = value;
-                nego_options.insert(key, format!("{value}"));
+                blksize = value.parse()?;
+                blksize = std::cmp::min(blksize, tftp::MAX_BLOCK_SIZE);
+                blksize = std::cmp::max(blksize, tftp::MIN_BLOCK_SIZE);
+                nego_options.insert(key, blksize.to_string());
             }
             "windowsize" => {
                 windowsize = value.parse()?;
                 nego_options.insert(key, value);
             }
             "tsize" => {
-                nego_options.insert(key, format!("{}", filesize));
+                nego_options.insert(key, filesize.to_string());
             }
             _ => (),
         }
@@ -116,51 +108,38 @@ async fn rrq_handler(
         let mut retries: u8 = 0;
         loop {
             socket.send(&oack).await?;
-
-            let mut recv_buf: [u8; 100] = [0; 100];
-            match recv_packet(&socket, &mut recv_buf).await {
-                Ok(pkt) => {
-                    if let TftpPacket::ACK(block) = pkt {
-                        if block == 0 {
-                            break;
-                        } else {
-                            return Err(anyhow!("expect block #0, but #{block}"));
-                        }
-                    } else {
-                        return Err(anyhow!("expect block #0, but {pkt:?}"));
-                    }
+            let Ok(block) = timeout(timeout_duration, recv_ack(&socket)).await? else {
+                println!("timeout");
+                retries += 1;
+                if retries == max_retries {
+                    return send_error(&socket, format!("Max retries reached")).await;
                 }
-                Err(e) => {
-                    if let Some(io_error) = e.downcast_ref::<io::Error>() {
-                        if io_error.kind() == io::ErrorKind::WouldBlock
-                            || io_error.kind() == io::ErrorKind::TimedOut
-                        {
-                            println!("timeout");
-                            retries += 1;
-                            if retries == tftp::MAX_RETRY_COUNT {
-                                return Err(anyhow!("Max retries reached"));
-                            }
-                        } else {
-                            return Err(e);
-                        }
-                    } else {
-                        return Err(e);
-                    }
-                }
+                continue;
+            };
+            if block == 0 {
+                break;
+            } else {
+                return send_error(&socket, format!("expect block #0, but #{block}")).await;
             }
         }
     }
 
     // 开始传输
-    // socket.send(TftpPacket::ERROR { code: 0, msg: "no way".to_string() }.serialize().as_slice())?;
     let mut send_buf: Vec<u8> = vec![0; usize::from(blksize)];
-    let mut recv_buf: [u8; 100] = [0; 100];
     let mut file = File::open(filename)?;
     let mut window = Window::new(windowsize);
     let mut size: usize = 0;
     let mut finish = false;
+    let mut retries: u8 = 0;
     while !finish {
         for block in &mut window {
+            if let Ok(_) = socket.try_peek_sender() {
+                println!("readable");
+                window.next_send = window.next_send.wrapping_sub(1);
+                size = 0;
+                break;
+            }
+
             size = file.read(&mut send_buf[..])?;
             let data = &send_buf[..size];
             let pkt = TftpPacket::DATA {
@@ -174,16 +153,27 @@ async fn rrq_handler(
                 break;
             }
         }
-        if let TftpPacket::ACK(ack_block) = recv_packet(&socket, &mut recv_buf).await? {
+        let diff: u16;
+        if let Ok(res) = timeout(timeout_duration, recv_ack(&socket)).await {
+            let ack_block = res?;
             let tmp = window.next_send;
             window.update(ack_block);
-            let diff = tmp.wrapping_sub(window.next_send);
-            if diff != 0 {
-                println!("retrans {diff}");
-                let diff: i64 = ((diff - 1) as i64) * (blksize as i64) + (size as i64);
-                let _ = file.seek(SeekFrom::Current(-diff))?;
-                finish = false;
+            diff = tmp.wrapping_sub(window.next_send);
+            retries = 0;
+        } else {
+            println!("timeout");
+            retries += 1;
+            if retries == max_retries {
+                return send_error(&socket, format!("Max retries reached")).await;
             }
+            diff = window.next_send.wrapping_sub(window.start);
+            window.next_send = window.start;
+        };
+        if diff != 0 {
+            println!("retrans #{}", window.next_send);
+            let diff: i64 = ((diff - 1) as i64) * (blksize as i64) + (size as i64);
+            let _ = file.seek(SeekFrom::Current(-diff))?;
+            finish = false;
         }
     }
 
@@ -196,12 +186,24 @@ async fn rrq_handler(
     Ok(())
 }
 
-async fn recv_packet(socket: &UdpSocket, buf: &mut [u8]) -> anyhow::Result<TftpPacket> {
-    let num = socket.recv(buf).await?;
-    match TftpPacket::deserialize(&buf[..num])? {
+async fn send_error(socket: &UdpSocket, msg: String) -> anyhow::Result<()> {
+    let error = TftpPacket::ERROR {
+        code: 0,
+        msg: msg.clone(),
+    };
+    socket.send(&error.serialize()).await?;
+    Err(anyhow!(msg))
+}
+
+async fn recv_ack(socket: &UdpSocket) -> anyhow::Result<u16> {
+    let mut buf = [0; 100];
+    let n = socket.recv(&mut buf).await?;
+
+    match TftpPacket::deserialize(&buf[..n])? {
+        TftpPacket::ACK(ack) => Ok(ack),
         TftpPacket::ERROR { code, msg } => {
             Err(anyhow!("Get error packet: code: {code}, msg: {msg}"))
         }
-        other => Ok(other),
+        _ => Err(anyhow!("Not ack packet")),
     }
 }
