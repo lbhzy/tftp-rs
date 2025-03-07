@@ -14,18 +14,22 @@ use tftp::Window;
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
-    let _args = Cli::parse();
-    let socket = UdpSocket::bind("0.0.0.0:69").await?;
+    let args = Cli::parse();
+    let socket = UdpSocket::bind(format!("{}:{}", args.ip, args.port)).await?;
     let mut buf: [u8; 100] = [0; 100];
+    std::env::set_current_dir(args.directory)?;
     let workdir = std::env::current_dir()?;
-    let timeout = Duration::from_millis(1000);
-    let max_retries = 3;
-    let gbn = true;
+    let timeout = Duration::from_millis(args.timeout);
+    let max_retries = args.retry;
+    let gbn = args.gbn;
 
     println!(
-        "TFTP server listen on {}, workdir: {}",
+        "TFTP server listen on {}, workdir: {}\nGBN: {}, timeout: {} ms, retry: {}",
         socket.local_addr()?,
-        workdir.display()
+        workdir.display(),
+        gbn,
+        args.timeout,
+        max_retries
     );
 
     loop {
@@ -73,6 +77,12 @@ async fn rrq_handler(
     }
 
     // 获取文件大小
+    let path = std::path::Path::new(&filename);
+    let filename = path
+        .file_name()
+        .ok_or(anyhow!("{:?}", path))?
+        .to_str()
+        .ok_or(anyhow!("Illegal characters"))?;
     let filesize = match fs::metadata(&filename) {
         Ok(metadata) => metadata.len(),
         Err(e) => {

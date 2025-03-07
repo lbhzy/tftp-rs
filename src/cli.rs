@@ -17,13 +17,25 @@ const STYLES: Styles = Styles::styled()
 pub struct Cli {
     /// Listen ip
     #[arg(short, long, default_value = "0.0.0.0")]
-    ip: IpAddr,
+    pub ip: IpAddr,
 
-    /// Port
+    /// Listen Port
     #[arg(short, long, default_value_t = 69)]
-    port: u16,
+    pub port: u16,
 
     /// Work directory
     #[arg(short, long, default_value = ".")]
-    directory: PathBuf,
+    pub directory: PathBuf,
+
+    /// Timeout (ms)
+    #[arg(short, long, default_value_t = 1000)]
+    pub timeout: u64,
+
+    /// Max retries
+    #[arg(short, long, default_value_t = 3)]
+    pub retry: u8,
+
+    /// Enable GO-Back-N
+    #[arg(short, long)]
+    pub gbn: bool,
 }
