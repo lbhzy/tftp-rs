@@ -20,6 +20,7 @@ async fn main() -> io::Result<()> {
     let workdir = std::env::current_dir()?;
     let timeout = Duration::from_millis(1000);
     let max_retries = 3;
+    let gbn = true;
 
     println!(
         "TFTP server listen on {}, workdir: {}",
@@ -39,7 +40,7 @@ async fn main() -> io::Result<()> {
                     options,
                 } => {
                     task::spawn(async move {
-                        rrq_handler(addr, filename, mode, options, timeout, max_retries)
+                        rrq_handler(addr, filename, mode, options, timeout, max_retries, gbn)
                             .await
                             .unwrap()
                     });
@@ -60,6 +61,7 @@ async fn rrq_handler(
     options: HashMap<String, String>,
     timeout_duration: Duration,
     max_retries: u8,
+    mut gbn: bool,
 ) -> anyhow::Result<()> {
     let start = Instant::now();
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
@@ -124,6 +126,11 @@ async fn rrq_handler(
         }
     }
 
+    if gbn && windowsize == 1 {
+        windowsize = 4;
+    } else {
+        gbn = false;
+    }
     // 开始传输
     let mut send_buf: Vec<u8> = vec![0; usize::from(blksize)];
     let mut file = File::open(filename)?;
@@ -134,7 +141,6 @@ async fn rrq_handler(
     while !finish {
         for block in &mut window {
             if let Ok(_) = socket.try_peek_sender() {
-                println!("readable");
                 window.next_send = window.next_send.wrapping_sub(1);
                 break;
             }
@@ -166,7 +172,7 @@ async fn rrq_handler(
                 window.start.wrapping_sub(1)
             }
         };
-        let offset = window.update(ack_block);
+        let offset = window.update(ack_block, gbn);
         let offset_size;
         if offset != 0 {
             println!("retrans #{}", window.next_send);

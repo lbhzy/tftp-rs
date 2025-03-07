@@ -15,14 +15,16 @@ impl Window {
         }
     }
 
-    pub fn update(&mut self, ack: u16) -> i64{
+    pub fn update(&mut self, ack: u16, gbn: bool) -> i64{
         let last_next_send = self.next_send;
         let last_start = self.start;
         if ack.wrapping_sub(self.start) < self.size {
             /* ack 落在窗口内，向前滑动窗口 */
             self.start = ack.wrapping_add(1);
             self.end = self.start.wrapping_add(self.size);
-            self.next_send = self.start;
+            if !gbn {
+                self.next_send = self.start;
+            }
         } else {
             /* 收到已经确认过的 ack，说明有丢包，重传窗口*/
             self.next_send = self.start;
