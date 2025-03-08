@@ -120,13 +120,19 @@ async fn rrq_handler(
         let mut retries: u8 = 0;
         loop {
             socket.send(&oack).await?;
-            let Ok(block) = timeout(timeout_duration, recv_ack(&socket)).await? else {
-                println!("timeout");
-                retries += 1;
-                if retries == max_retries {
-                    return send_error(&socket, format!("Max retries reached")).await;
+            let block = match timeout(timeout_duration, recv_ack(&socket)).await {
+                Ok(res) => {
+                    res?
                 }
-                continue;
+                Err(_) => {
+                    println!("timeout");
+                    retries += 1;
+                    if retries == max_retries {
+                        return send_error(&socket, format!("Max retries reached")).await;
+                    }
+                    continue;
+                }
+
             };
             if block == 0 {
                 break;
