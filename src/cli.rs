@@ -12,7 +12,7 @@ const STYLES: Styles = Styles::styled()
 
 #[derive(Parser, Debug)]
 #[command(name = "tftp")]
-#[command(about = "A simple TFTP client/server", long_about = None)]
+#[command(about = "A high-performance asynchronous TFTP server", long_about = None)]
 #[command(styles = STYLES)]
 pub struct Cli {
     /// Listen ip
