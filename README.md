@@ -11,7 +11,23 @@
 ## 安装与使用
 ```bash
 # 通过cargo安装
-cargo install --git https://github.com/lbhzy/tftp-rs
+$ cargo install --git https://github.com/lbhzy/tftp-rs
 
-# 使用
-tftpd
+# 帮助信息
+$ tftp -h
+A high-performance asynchronous TFTP server
+
+Usage: tftp.exe [OPTIONS]
+
+Options:
+  -i, --ip <IP>                Listen ip [default: 0.0.0.0]
+  -p, --port <PORT>            Listen Port [default: 69]
+  -d, --directory <DIRECTORY>  Work directory [default: .]
+  -t, --timeout <TIMEOUT>      Timeout (ms) [default: 1000]
+  -r, --retry <RETRY>          Max retries [default: 3]
+  -g, --gbn                    Enable GO-Back-N
+  -h, --help                   Print help
+
+# 运行
+$ tftp -g
+```
