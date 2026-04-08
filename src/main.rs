@@ -16,7 +16,7 @@ use tftp::Window;
 async fn main() -> io::Result<()> {
     let args = Cli::parse();
     let socket = UdpSocket::bind(format!("{}:{}", args.ip, args.port)).await?;
-    let mut buf: [u8; 100] = [0; 100];
+    let mut buf= [0u8; 65536];
     std::env::set_current_dir(args.directory)?;
     let workdir = std::env::current_dir()?;
     let timeout = Duration::from_millis(args.timeout);
