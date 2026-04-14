@@ -1,7 +1,7 @@
 use crate::SessionConfig;
 use crate::packet::TftpPacket;
 use crate::session::Session;
-use log::info;
+use log::{error, info};
 use std::net::SocketAddr;
 use tokio::net::UdpSocket;
 
@@ -37,12 +37,37 @@ impl TftpServer {
                             let socket = UdpSocket::bind("0.0.0.0:0").await.unwrap();
                             socket.connect(peer).await.unwrap();
                             let mut session = Session::new(socket, config);
-                            session.negotiation(filename, mode, options).await.unwrap();
-                            session.send_file().await.unwrap();
+                            if let Err(e) = session.negotiation(filename, mode, options).await {
+                                error!("{peer} RRQ negotiation failed: {e}");
+                                return;
+                            }
+                            if let Err(e) = session.send_file().await {
+                                error!("{peer} send_file failed: {e}");
+                            }
                         });
                     }
-                    TftpPacket::WRQ { .. } => {
-                        println!("WRQ is not supported");
+                    TftpPacket::WRQ {
+                        filename,
+                        mode,
+                        options,
+                    } => {
+                        let config = self.config.clone();
+                        tokio::spawn(async move {
+                            let socket = UdpSocket::bind("0.0.0.0:0").await.unwrap();
+                            socket.connect(peer).await.unwrap();
+                            let mut session = Session::new(socket, config);
+                            if let Err(e) = session
+                                .negotiation_wrq(filename, mode, options)
+                                .await
+                                .and_then(|_| Ok(()))
+                            {
+                                error!("{peer} WRQ negotiation failed: {e}");
+                                return;
+                            }
+                            if let Err(e) = session.recv_file().await {
+                                error!("{peer} recv_file failed: {e}");
+                            }
+                        });
                     }
                     _ => (),
                 }
